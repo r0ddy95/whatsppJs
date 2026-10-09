@@ -139,6 +139,14 @@ app.get('/groups', apiAuth, async (req, res) => {
   if (!ready || !client) return res.status(503).json({ ok: false, error: 'whatsapp_not_ready' });
   try {
     console.log('[GROUPS] Début getChats()');
+    const diagnostic = await client.pupPage.evaluate(() => ({
+    wwebjsPresent: !!window.WWebJS,
+    getChatsType: typeof window.WWebJS?.getChats,
+    storePresent: !!window.Store,
+    chatStorePresent: !!window.Store?.Chat
+}));
+
+console.log('[GROUPS] Diagnostic WhatsApp Web:', diagnostic);
     const chats = await client.getChats();
     const groups = chats.filter(chat => chat.isGroup).map(chat => ({
       id: chat.id._serialized, name: chat.name

@@ -13,6 +13,52 @@ const SESSION_PATH = process.env.SESSION_PATH || '/data/whatsapp';
 const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
 const RETRY_MS = 30000;
+const BIRTHDAY_ENDPOINT = process.env.JJR_BIRTHDAY_ENDPOINT || '';
+const BIRTHDAY_CRON_TOKEN = process.env.JJR_CRON_TOKEN || '';
+let birthdayTimer = null;
+let birthdayLastSuccess = '';
+let birthdayLastAttempt = 0;
+let birthdayRunning = false;
+
+// Sans dépendance npm supplémentaire. Heure civile Europe/Paris, y compris heure d'été.
+async function checkDailyBirthdays() {
+  if (stopping || birthdayRunning || !BIRTHDAY_ENDPOINT || !BIRTHDAY_CRON_TOKEN) return;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', hourCycle: 'h23'
+  }).formatToParts(new Date()).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
+  const today = `${parts.year}-${parts.month}-${parts.day}`;
+  if (Number(parts.hour) < 9 || birthdayLastSuccess === today || Date.now() - birthdayLastAttempt < 30 * 60000) return;
+  birthdayRunning = true;
+  birthdayLastAttempt = Date.now();
+  try {
+    const response = await fetch(BIRTHDAY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'X-JJR-Cron-Token': BIRTHDAY_CRON_TOKEN },
+      signal: AbortSignal.timeout(30000)
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`);
+    let payload;
+    try { payload = JSON.parse(body); } catch (_) { throw new Error('Réponse non JSON du site PHP'); }
+    if (payload?.ok !== true) throw new Error('Réponse du traitement anniversaires non valide');
+    birthdayLastSuccess = today;
+    console.log('[birthdays] OK', today, JSON.stringify(payload).slice(0, 250));
+  } catch (error) {
+    console.error('[birthdays] Echec (nouvel essai dans 30 min):', error.message);
+  } finally {
+    birthdayRunning = false;
+  }
+}
+function startBirthdayScheduler() {
+  if (!BIRTHDAY_ENDPOINT || !BIRTHDAY_CRON_TOKEN) {
+    console.warn('[birthdays] Définir JJR_BIRTHDAY_ENDPOINT et JJR_CRON_TOKEN dans Railway');
+    return;
+  }
+  birthdayTimer = setInterval(() => { checkDailyBirthdays().catch(e => console.error('[birthdays]', e)); }, 60000);
+  checkDailyBirthdays().catch(e => console.error('[birthdays]', e));
+}
+
 
 fs.mkdirSync(SESSION_PATH, { recursive: true });
 fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -187,6 +233,7 @@ async function shutdown(signal) {
   ready = false;
   console.log(`[WA] ${signal}: arrêt propre`);
   if (retryTimer) clearTimeout(retryTimer);
+  if (birthdayTimer) clearInterval(birthdayTimer);
   const forceExit = setTimeout(() => process.exit(0), 8000);
   forceExit.unref();
   try { if (client) await client.destroy(); }
@@ -198,5 +245,6 @@ process.on('SIGINT', () => { shutdown('SIGINT'); });
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log('Gateway on', PORT);
+  startBirthdayScheduler();
   startWhatsApp().catch(e => console.error('[WA] Erreur de démarrage:', e));
 });

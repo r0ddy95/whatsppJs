@@ -56,12 +56,43 @@ app.get('/qr',adminAuth,async(req,res)=>{
  const data=await QRCode.toDataURL(lastQr,{width:360});
  res.send(`<meta name="viewport" content="width=device-width"><body style="font-family:sans-serif;text-align:center;background:#111;color:#fff"><h2>Connexion WhatsApp JJR</h2><img src="${data}"><p>WhatsApp → Appareils connectés → Connecter un appareil</p></body>`);
 });
-app.get('/groups',apiAuth,async(req,res)=>{
- if(!ready) return res.status(503).json({ok:false,error:'whatsapp_not_ready'});
- try{
-  const chats=await client.getChats();
-  res.json({ok:true,groups:chats.filter(x=>x.isGroup).map(x=>({id:x.id._serialized,name:x.name}))});
- }catch(e){res.status(500).json({ok:false,error:e.message})}
+app.get('/groups', apiAuth, async (req, res) => {
+    if (!ready) {
+        return res.status(503).json({
+            ok: false,
+            error: 'whatsapp_not_ready'
+        });
+    }
+
+    try {
+        console.log('[GROUPS] Récupération des groupes...');
+
+        const chats = await client.getChats();
+
+        const groups = chats
+            .filter(chat => chat.isGroup)
+            .map(chat => ({
+                id: chat.id._serialized,
+                name: chat.name
+            }));
+
+        console.log('[GROUPS] Groupes trouvés :', groups.length);
+
+        res.json({
+            ok: true,
+            groups
+        });
+
+    } catch (e) {
+        console.error('[GROUPS] ERREUR :', e);
+        console.error('[GROUPS] STACK :', e?.stack);
+
+        res.status(500).json({
+            ok: false,
+            error: String(e?.message || e),
+            type: e?.name || 'UnknownError'
+        });
+    }
 });
 app.post('/send',apiAuth,async(req,res)=>{
  const notificationId=String(req.body?.notification_id||'').trim();

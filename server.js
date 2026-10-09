@@ -28,7 +28,7 @@ async function checkDailyBirthdays() {
     hour: '2-digit', hourCycle: 'h23'
   }).formatToParts(new Date()).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
   const today = `${parts.year}-${parts.month}-${parts.day}`;
-  if (Number(parts.hour) < 9 || birthdayLastSuccess === today || Date.now() - birthdayLastAttempt < 30 * 60000) return;
+  if (Number(parts.hour) < 8 || birthdayLastSuccess === today || Date.now() - birthdayLastAttempt < 30 * 60000) return;
   birthdayRunning = true;
   birthdayLastAttempt = Date.now();
   try {

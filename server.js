@@ -138,23 +138,27 @@ app.get('/qr', adminAuth, async (req, res) => {
 app.get('/groups', apiAuth, async (req, res) => {
   if (!ready || !client) return res.status(503).json({ ok: false, error: 'whatsapp_not_ready' });
   try {
-    console.log('[GROUPS] Début getChats()');
-    const diagnostic = await client.pupPage.evaluate(() => ({
-    wwebjsPresent: !!window.WWebJS,
-    getChatsType: typeof window.WWebJS?.getChats,
-    storePresent: !!window.Store,
-    chatStorePresent: !!window.Store?.Chat
-}));
-
-console.log('[GROUPS] Diagnostic WhatsApp Web:', diagnostic);
-    const chats = await client.getChats();
-    const groups = chats.filter(chat => chat.isGroup).map(chat => ({
-      id: chat.id._serialized, name: chat.name
-    }));
-    console.log('[GROUPS] Groupes trouvés:', groups.length);
-    return res.json({ ok: true, groups });
+    console.log('[GROUPS] Diagnostic brut WAWebCollections (sans getChatModel)');
+    const diagnostic = await client.pupPage.evaluate(() => {
+      const collection = window.require('WAWebCollections');
+      const chats = collection.Chat.getModelsArray();
+      const groups = chats.map(chat => {
+        const rawId = chat.id;
+        const id = typeof rawId === 'string' ? rawId
+          : (rawId?._serialized || (rawId?.user && rawId?.server ? `${rawId.user}@${rawId.server}` : ''));
+        return {
+          id,
+          name: chat.name || chat.formattedTitle || '',
+          isGroup: Boolean(chat.groupMetadata) || id.endsWith('@g.us')
+        };
+      }).filter(chat => chat.isGroup && chat.id)
+        .map(({ id, name }) => ({ id, name }));
+      return { total: chats.length, groups };
+    });
+    console.log('[GROUPS] Diagnostic brut:', JSON.stringify(diagnostic));
+    return res.json({ ok: true, ...diagnostic });
   } catch (e) {
-    console.error('[GROUPS] ERREUR COMPLETE:', e?.stack || e);
+    console.error('[GROUPS] ERREUR DIAGNOSTIC BRUT:', e?.stack || e);
     return res.status(500).json({ ok: false, error: String(e?.message || e), type: e?.name || 'UnknownError' });
   }
 });

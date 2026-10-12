@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('node:https');
 const { timingSafeEqual } = require('node:crypto');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.API_KEY || '';
@@ -16,15 +16,6 @@ const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
 const RETRY_MS = 30000;
 const BIRTHDAY_SYNC_TOKEN = process.env.JJR_BIRTHDAY_SYNC_TOKEN || '';
-const BIRTHDAY_MESSAGE_TEMPLATE = process.env.JJR_BIRTHDAY_MESSAGE ||
-  '🎂🎉 Joyeux anniversaire à {prenom} {nom} ! 🥳\n\nToute la communauté des anciens du lycée Jean-Jacques Rousseau te souhaite une très belle journée ! 🎁🎓';
-function birthdayMessage(entry) {
-  return BIRTHDAY_MESSAGE_TEMPLATE
-    .replace(/\\n/g, '\n')
-    .replace(/\{prenom\}/g, entry.prenom.trim())
-    .replace(/\{nom\}/g, entry.nom.trim());
-}
-
 const BIRTHDAY_FILE = path.join(STATE_DIR, 'birthdays.json');
 const BIRTHDAY_LOG_FILE = path.join(STATE_DIR, 'birthday_delivery.json');
 let birthdayTimer = null;
@@ -46,13 +37,18 @@ function writeJsonAtomic(file, data) {
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
+function validBirthdayPhoto(photo) {
+  if (photo === null || photo === undefined) return true;
+  if (!photo || photo.mimetype !== 'image/jpeg' || typeof photo.data !== 'string' || photo.data.length > 90000) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(photo.data) && photo.data.length % 4 === 0;
+}
 function validBirthday(item) {
   if (!item || !Number.isSafeInteger(item.id) || item.id < 1 || item.id > 2147483647) return false;
   if (typeof item.prenom !== 'string' || !item.prenom.trim() || item.prenom.length > 150) return false;
   if (typeof item.nom !== 'string' || !item.nom.trim() || item.nom.length > 150) return false;
-  return item.month_day === null || (typeof item.month_day === 'string' &&
+  return validBirthdayPhoto(item.photo) && (item.month_day === null || (typeof item.month_day === 'string' &&
     /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/.test(item.month_day) &&
-    !Number.isNaN(Date.parse('2024-' + item.month_day + 'T12:00:00Z')));
+    !Number.isNaN(Date.parse('2024-' + item.month_day + 'T12:00:00Z'))) );
 }
 let birthdays = readJson(BIRTHDAY_FILE, {});
 let birthdayDelivery = readJson(BIRTHDAY_LOG_FILE, {});
@@ -69,9 +65,20 @@ async function checkDailyBirthdays() {
       if (stopping || !ready || !client) break;
       const key = `birthday:${clock.date}:${entry.id}`;
       if (birthdayDelivery[key]) continue;
-      const message = birthdayMessage(entry);
+      const message = `🎂 Joyeux anniversaire à ${entry.prenom.trim()} ${entry.nom.trim()} ! 🎉`;
       try {
-        const result = await client.sendMessage(GROUP_ID, message);
+        let result;
+        if (entry.photo && validBirthdayPhoto(entry.photo)) {
+          try {
+            const media = new MessageMedia(entry.photo.mimetype, entry.photo.data, 'anniversaire.jpg');
+            result = await client.sendMessage(GROUP_ID, media, { caption: message });
+          } catch (photoError) {
+            console.warn('[birthdays] Photo indisponible, repli texte eleve', entry.id, photoError.message);
+            result = await client.sendMessage(GROUP_ID, message);
+          }
+        } else {
+          result = await client.sendMessage(GROUP_ID, message);
+        }
         birthdayDelivery[key] = { ts: Date.now(), messageId: result?.id?._serialized || null };
         writeJsonAtomic(BIRTHDAY_LOG_FILE, birthdayDelivery);
         console.log('[birthdays] Envoyé', clock.date, 'eleve', entry.id);
@@ -208,7 +215,8 @@ app.post('/birthdays/sync', (req, res) => {
     const next = bulk ? {} : { ...birthdays };
     for (const item of items) {
       if (item.month_day === null) delete next[item.id];
-      else next[item.id] = { id: item.id, prenom: item.prenom.trim(), nom: item.nom.trim(), month_day: item.month_day };
+      else next[item.id] = { id: item.id, prenom: item.prenom.trim(), nom: item.nom.trim(), month_day: item.month_day,
+        photo: item.photo === undefined ? (next[item.id]?.photo || null) : item.photo };
     }
     writeJsonAtomic(BIRTHDAY_FILE, next);
     birthdays = next;

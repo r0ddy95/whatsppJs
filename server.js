@@ -20,7 +20,7 @@ let birthdayLastSuccess = '';
 let birthdayLastAttempt = 0;
 let birthdayRunning = false;
 
-// Diagnostic réseau sans afficher le token ni d'autres secrets.
+// Diagnostic réseau sans afficher le token ni d'autres secrets.  
 function birthdayErrorDetails(error) {
   const parts = [];
   let current = error;

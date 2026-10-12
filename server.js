@@ -159,7 +159,7 @@ async function startWhatsApp() {
     ready = false;
     console.error('[WA] Impossible de démarrer Chromium:', error?.stack || error);
     // Ne jamais supprimer automatiquement SingletonLock : un ancien conteneur
-    // peut encore utiliser ce profil sur le volume partagé Railway.
+    // peut encore utiliser ce profil sur le volume partagé Railway.  
     try { await instance.destroy(); } catch (cleanupError) {
       console.warn('[WA] Nettoyage après échec:', cleanupError?.message || cleanupError);
     }

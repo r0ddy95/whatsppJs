@@ -3,6 +3,9 @@ const express = require('express');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const https = require('node:https');
+const tls = require('node:tls');
+const { X509Certificate } = require('node:crypto');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -20,7 +23,7 @@ let birthdayLastSuccess = '';
 let birthdayLastAttempt = 0;
 let birthdayRunning = false;
 
-// Diagnostic réseau sans afficher le token ni d'autres secrets.  
+// Diagnostic réseau sans afficher le token ni d'autres secrets.
 function birthdayErrorDetails(error) {
   const parts = [];
   let current = error;
@@ -31,6 +34,66 @@ function birthdayErrorDetails(error) {
     if (details) parts.push(details);
   }
   return parts.join(' <- ');
+}
+
+// Répare uniquement l'appel anniversaires : certificat intermédiaire YR1
+// et racine YR signée par ISRG Root X1, téléchargés depuis leurs sources publiques.
+// La vérification TLS (certificat + nom de domaine) reste active.
+let birthdayCaBundle = null;
+async function getBirthdayCaBundle() {
+  if (birthdayCaBundle) return birthdayCaBundle;
+  const sources = [
+    { url: 'http://yr1.i.lencr.org/', subject: /CN\s*=\s*YR1/i },
+    { url: 'https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem', subject: /CN\s*=\s*(?:Root YR|ISRG Root YR)/i }
+  ];
+  const certificates = [];
+  for (const source of sources) {
+    const response = await fetch(source.url, { signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`Certificat CA indisponible : HTTP ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > 20000) throw new Error('Certificat CA anormalement volumineux');
+    const cert = new X509Certificate(bytes);
+    if (!source.subject.test(cert.subject) || !cert.ca) {
+      throw new Error(`Certificat CA inattendu : ${cert.subject}`);
+    }
+    certificates.push(cert.toString());
+  }
+  // Les racines standard de Node restent présentes ; aucun bypass TLS.
+  birthdayCaBundle = [...tls.rootCertificates, ...certificates];
+  console.log('[birthdays] Chaîne CA YR1 chargée pour HTTPS');
+  return birthdayCaBundle;
+}
+
+async function postBirthdayCron() {
+  const url = new URL(BIRTHDAY_ENDPOINT);
+  if (url.protocol !== 'https:') throw new Error('JJR_BIRTHDAY_ENDPOINT doit utiliser HTTPS');
+  const ca = await getBirthdayCaBundle();
+  return new Promise((resolve, reject) => {
+    const request = https.request(url, {
+      method: 'POST',
+      ca,
+      rejectUnauthorized: true,
+      timeout: 30000,
+      headers: { 'X-JJR-Cron-Token': BIRTHDAY_CRON_TOKEN }
+    }, response => {
+      const chunks = [];
+      let total = 0;
+      response.on('data', chunk => {
+        total += chunk.length;
+        if (total > 65536) { request.destroy(new Error('Réponse PHP trop volumineuse')); return; }
+        chunks.push(chunk);
+      });
+      response.on('end', () => resolve({
+        ok: response.statusCode >= 200 && response.statusCode < 300,
+        status: response.statusCode,
+        text: Buffer.concat(chunks).toString('utf8')
+      }));
+      response.on('error', reject);
+    });
+    request.on('timeout', () => request.destroy(new Error('Timeout HTTPS anniversaires')));
+    request.on('error', reject);
+    request.end();
+  });
 }
 
 // Sans dépendance npm supplémentaire. Heure civile Europe/Paris, y compris heure d'été.
@@ -45,12 +108,8 @@ async function checkDailyBirthdays() {
   birthdayRunning = true;
   birthdayLastAttempt = Date.now();
   try {
-    const response = await fetch(BIRTHDAY_ENDPOINT, {
-      method: 'POST',
-      headers: { 'X-JJR-Cron-Token': BIRTHDAY_CRON_TOKEN },
-      signal: AbortSignal.timeout(30000)
-    });
-    const body = await response.text();
+    const response = await postBirthdayCron();
+    const body = response.text;
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`);
     let payload;
     try { payload = JSON.parse(body); } catch (_) { throw new Error('Réponse non JSON du site PHP'); }

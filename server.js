@@ -20,6 +20,19 @@ let birthdayLastSuccess = '';
 let birthdayLastAttempt = 0;
 let birthdayRunning = false;
 
+// Diagnostic réseau sans afficher le token ni d'autres secrets.
+function birthdayErrorDetails(error) {
+  const parts = [];
+  let current = error;
+  for (let i = 0; current && i < 4; i++, current = current.cause) {
+    const details = [current.name, current.message, current.code && `code=${current.code}`,
+      current.errno && `errno=${current.errno}`, current.syscall && `syscall=${current.syscall}`]
+      .filter(Boolean).join(' | ');
+    if (details) parts.push(details);
+  }
+  return parts.join(' <- ');
+}
+
 // Sans dépendance npm supplémentaire. Heure civile Europe/Paris, y compris heure d'été.
 async function checkDailyBirthdays() {
   if (stopping || birthdayRunning || !BIRTHDAY_ENDPOINT || !BIRTHDAY_CRON_TOKEN) return;
@@ -45,7 +58,7 @@ async function checkDailyBirthdays() {
     birthdayLastSuccess = today;
     console.log('[birthdays] OK', today, JSON.stringify(payload).slice(0, 250));
   } catch (error) {
-    console.error('[birthdays] Echec (nouvel essai dans 30 min):', error.message);
+    console.error('[birthdays] Echec (nouvel essai dans 30 min):', birthdayErrorDetails(error));
   } finally {
     birthdayRunning = false;
   }

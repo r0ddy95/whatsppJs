@@ -4,8 +4,7 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const https = require('node:https');
-const tls = require('node:tls');
-const { X509Certificate } = require('node:crypto');
+const { timingSafeEqual } = require('node:crypto');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -16,125 +15,68 @@ const SESSION_PATH = process.env.SESSION_PATH || '/data/whatsapp';
 const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
 const RETRY_MS = 30000;
-const BIRTHDAY_ENDPOINT = process.env.JJR_BIRTHDAY_ENDPOINT || '';
-const BIRTHDAY_CRON_TOKEN = process.env.JJR_CRON_TOKEN || '';
+const BIRTHDAY_SYNC_TOKEN = process.env.JJR_BIRTHDAY_SYNC_TOKEN || '';
+const BIRTHDAY_FILE = path.join(STATE_DIR, 'birthdays.json');
+const BIRTHDAY_LOG_FILE = path.join(STATE_DIR, 'birthday_delivery.json');
 let birthdayTimer = null;
-let birthdayLastSuccess = '';
-let birthdayLastAttempt = 0;
 let birthdayRunning = false;
-
-// Diagnostic réseau sans afficher le token ni d'autres secrets.
-function birthdayErrorDetails(error) {
-  const parts = [];
-  let current = error;
-  for (let i = 0; current && i < 4; i++, current = current.cause) {
-    const details = [current.name, current.message, current.code && `code=${current.code}`,
-      current.errno && `errno=${current.errno}`, current.syscall && `syscall=${current.syscall}`]
-      .filter(Boolean).join(' | ');
-    if (details) parts.push(details);
-  }
-  return parts.join(' <- ');
-}
-
-// Répare uniquement l'appel anniversaires : certificat intermédiaire YR1
-// et racine YR signée par ISRG Root X1, téléchargés depuis leurs sources publiques.
-// La vérification TLS (certificat + nom de domaine) reste active.
-let birthdayCaBundle = null;
-async function getBirthdayCaBundle() {
-  if (birthdayCaBundle) return birthdayCaBundle;
-  const sources = [
-    { url: 'http://yr1.i.lencr.org/', subject: /CN\s*=\s*YR1/i },
-    { url: 'https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem', subject: /CN\s*=\s*(?:Root YR|ISRG Root YR)/i }
-  ];
-  const certificates = [];
-  for (const source of sources) {
-    const response = await fetch(source.url, { signal: AbortSignal.timeout(12000) });
-    if (!response.ok) throw new Error(`Certificat CA indisponible : HTTP ${response.status}`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.length > 20000) throw new Error('Certificat CA anormalement volumineux');
-    const cert = new X509Certificate(bytes);
-    if (!source.subject.test(cert.subject) || !cert.ca) {
-      throw new Error(`Certificat CA inattendu : ${cert.subject}`);
-    }
-    certificates.push(cert.toString());
-  }
-  // Les racines standard de Node restent présentes ; aucun bypass TLS.
-  birthdayCaBundle = [...tls.rootCertificates, ...certificates];
-  console.log('[birthdays] Chaîne CA YR1 chargée pour HTTPS');
-  return birthdayCaBundle;
-}
-
-async function postBirthdayCron() {
-  const url = new URL(BIRTHDAY_ENDPOINT);
-  if (url.protocol !== 'https:') throw new Error('JJR_BIRTHDAY_ENDPOINT doit utiliser HTTPS');
-  const ca = await getBirthdayCaBundle();
-  return new Promise((resolve, reject) => {
-    const request = https.request(url, {
-      method: 'POST',
-      ca,
-      rejectUnauthorized: true,
-      timeout: 30000,
-      headers: { 'X-JJR-Cron-Token': BIRTHDAY_CRON_TOKEN }
-    }, response => {
-      const chunks = [];
-      let total = 0;
-      response.on('data', chunk => {
-        total += chunk.length;
-        if (total > 65536) { request.destroy(new Error('Réponse PHP trop volumineuse')); return; }
-        chunks.push(chunk);
-      });
-      response.on('end', () => resolve({
-        ok: response.statusCode >= 200 && response.statusCode < 300,
-        status: response.statusCode,
-        contentType: response.headers['content-type'] || '',
-        text: Buffer.concat(chunks).toString('utf8')
-      }));
-      response.on('error', reject);
-    });
-    request.on('timeout', () => request.destroy(new Error('Timeout HTTPS anniversaires')));
-    request.on('error', reject);
-    request.end();
-  });
-}
-
-// Sans dépendance npm supplémentaire. Heure civile Europe/Paris, y compris heure d'été.
-async function checkDailyBirthdays() {
-  if (stopping || birthdayRunning || !BIRTHDAY_ENDPOINT || !BIRTHDAY_CRON_TOKEN) return;
+function parisClock() {
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', hourCycle: 'h23'
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
   }).formatToParts(new Date()).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
-  const today = `${parts.year}-${parts.month}-${parts.day}`;
-  if (Number(parts.hour) < 6 || birthdayLastSuccess === today || Date.now() - birthdayLastAttempt < 30 * 60000) return;
+  return { date: `${parts.year}-${parts.month}-${parts.day}`,
+    monthDay: `${parts.month}-${parts.day}`, hour: Number(parts.hour), minute: Number(parts.minute) };
+}
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { if (e.code !== 'ENOENT') console.error('[birthdays] Lecture fichier:', file, e.message); return fallback; }
+}
+function writeJsonAtomic(file, data) {
+  const tmp = file + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+function validBirthday(item) {
+  if (!item || !Number.isSafeInteger(item.id) || item.id < 1 || item.id > 2147483647) return false;
+  if (typeof item.prenom !== 'string' || !item.prenom.trim() || item.prenom.length > 150) return false;
+  if (typeof item.nom !== 'string' || !item.nom.trim() || item.nom.length > 150) return false;
+  return item.month_day === null || (typeof item.month_day === 'string' &&
+    /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/.test(item.month_day) &&
+    !Number.isNaN(Date.parse('2024-' + item.month_day + 'T12:00:00Z')));
+}
+let birthdays = readJson(BIRTHDAY_FILE, {});
+let birthdayDelivery = readJson(BIRTHDAY_LOG_FILE, {});
+if (!birthdays || typeof birthdays !== 'object' || Array.isArray(birthdays)) birthdays = {};
+if (!birthdayDelivery || typeof birthdayDelivery !== 'object' || Array.isArray(birthdayDelivery)) birthdayDelivery = {};
+async function checkDailyBirthdays() {
+  if (stopping || birthdayRunning) return;
+  const clock = parisClock();
+  if (clock.hour < 6 || !ready || !client || !GROUP_ID) return;
   birthdayRunning = true;
-  birthdayLastAttempt = Date.now();
   try {
-    const response = await postBirthdayCron();
-    const body = response.text;
-    // Diagnostic limité : ne jamais journaliser le token ou des en-têtes secrets.
-    const preview = body.slice(0, 400).replace(/[\r\n\t]+/g, ' ');
-    console.log('[birthdays] HTTP', response.status, 'Content-Type:', response.contentType, 'Réponse (400 caractères max):', preview);
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`);
-    let payload;
-    try { payload = JSON.parse(body); } catch (_) { throw new Error('Réponse non JSON du site PHP'); }
-    if (payload?.ok !== true) throw new Error('Réponse du traitement anniversaires non valide');
-    birthdayLastSuccess = today;
-    console.log('[birthdays] OK', today, JSON.stringify(payload).slice(0, 250));
-  } catch (error) {
-    console.error('[birthdays] Echec (nouvel essai dans 30 min):', birthdayErrorDetails(error));
-  } finally {
-    birthdayRunning = false;
-  }
+    const matches = Object.values(birthdays).filter(e => e.month_day === clock.monthDay);
+    for (const entry of matches) {
+      if (stopping || !ready || !client) break;
+      const key = `birthday:${clock.date}:${entry.id}`;
+      if (birthdayDelivery[key]) continue;
+      const message = `🎂 Joyeux anniversaire à ${entry.prenom.trim()} ${entry.nom.trim()} ! 🎉`;
+      try {
+        const result = await client.sendMessage(GROUP_ID, message);
+        birthdayDelivery[key] = { ts: Date.now(), messageId: result?.id?._serialized || null };
+        writeJsonAtomic(BIRTHDAY_LOG_FILE, birthdayDelivery);
+        console.log('[birthdays] Envoyé', clock.date, 'eleve', entry.id);
+      } catch (e) {
+        console.error('[birthdays] Echec envoi eleve', entry.id, e.message);
+      }
+    }
+  } finally { birthdayRunning = false; }
 }
 function startBirthdayScheduler() {
-  if (!BIRTHDAY_ENDPOINT || !BIRTHDAY_CRON_TOKEN) {
-    console.warn('[birthdays] Définir JJR_BIRTHDAY_ENDPOINT et JJR_CRON_TOKEN dans Railway');
-    return;
-  }
-  birthdayTimer = setInterval(() => { checkDailyBirthdays().catch(e => console.error('[birthdays]', e)); }, 60000);
+  console.log('[birthdays] Planificateur Railway activé (Europe/Paris, dès 06:00)');
+  birthdayTimer = setInterval(() => checkDailyBirthdays().catch(e => console.error('[birthdays]', e)), 10000);
   checkDailyBirthdays().catch(e => console.error('[birthdays]', e));
 }
-
 
 fs.mkdirSync(SESSION_PATH, { recursive: true });
 fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -240,6 +182,43 @@ function adminAuth(req, res, next) {
   if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(401).send('Unauthorized');
   next();
 }
+
+// Synchronisation sortante PHP -> Railway, protégée par un secret distinct de API_KEY.
+app.post('/birthdays/sync', (req, res) => {
+  const auth = req.get('authorization') || '';
+  const expected = 'Bearer ' + BIRTHDAY_SYNC_TOKEN;
+  const a = Buffer.from(auth), b = Buffer.from(expected);
+  if (!BIRTHDAY_SYNC_TOKEN || a.length !== b.length || !timingSafeEqual(a, b))
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  const body = req.body;
+  const bulk = Array.isArray(body?.students) && body?.replace === true;
+  const items = bulk ? body.students : [body];
+  if (items.length > 10000 || !items.every(validBirthday))
+    return res.status(400).json({ ok: false, error: 'invalid_birthday_payload' });
+  try {
+    const next = bulk ? {} : { ...birthdays };
+    for (const item of items) {
+      if (item.month_day === null) delete next[item.id];
+      else next[item.id] = { id: item.id, prenom: item.prenom.trim(), nom: item.nom.trim(), month_day: item.month_day };
+    }
+    writeJsonAtomic(BIRTHDAY_FILE, next);
+    birthdays = next;
+    console.log('[birthdays] Synchronisation', bulk ? 'complète' : 'unitaire', 'total', Object.keys(birthdays).length);
+    res.json({ ok: true, total: Object.keys(birthdays).length });
+    checkDailyBirthdays().catch(e => console.error('[birthdays]', e));
+  } catch (e) {
+    console.error('[birthdays] Erreur stockage:', e.message);
+    res.status(500).json({ ok: false, error: 'storage_failed' });
+  }
+});
+app.get('/birthdays/status', apiAuth, (req, res) => {
+  const clock = parisClock();
+  res.json({ ok: true, date: clock.date, parisHour: clock.hour,
+    students: Object.keys(birthdays).length,
+    today: Object.values(birthdays).filter(e => e.month_day === clock.monthDay).length,
+    sentToday: Object.keys(birthdayDelivery).filter(k => k.startsWith('birthday:' + clock.date + ':')).length,
+    whatsappReady: ready });
+});
 
 app.get('/', (req, res) => res.json({ service: 'JJR WhatsApp Gateway', ok: true, whatsappReady: ready }));
 app.get('/health', apiAuth, (req, res) => res.json({

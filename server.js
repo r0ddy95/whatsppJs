@@ -86,6 +86,7 @@ async function postBirthdayCron() {
       response.on('end', () => resolve({
         ok: response.statusCode >= 200 && response.statusCode < 300,
         status: response.statusCode,
+        contentType: response.headers['content-type'] || '',
         text: Buffer.concat(chunks).toString('utf8')
       }));
       response.on('error', reject);
@@ -110,6 +111,9 @@ async function checkDailyBirthdays() {
   try {
     const response = await postBirthdayCron();
     const body = response.text;
+    // Diagnostic limité : ne jamais journaliser le token ou des en-têtes secrets.
+    const preview = body.slice(0, 400).replace(/[\r\n\t]+/g, ' ');
+    console.log('[birthdays] HTTP', response.status, 'Content-Type:', response.contentType, 'Réponse (400 caractères max):', preview);
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 180)}`);
     let payload;
     try { payload = JSON.parse(body); } catch (_) { throw new Error('Réponse non JSON du site PHP'); }

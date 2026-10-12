@@ -16,6 +16,15 @@ const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
 const RETRY_MS = 30000;
 const BIRTHDAY_SYNC_TOKEN = process.env.JJR_BIRTHDAY_SYNC_TOKEN || '';
+const BIRTHDAY_MESSAGE_TEMPLATE = process.env.JJR_BIRTHDAY_MESSAGE ||
+  '🎂🎉 Joyeux anniversaire à {prenom} {nom} ! 🥳\n\nToute la communauté des anciens du lycée Jean-Jacques Rousseau te souhaite une très belle journée ! 🎁🎓';
+function birthdayMessage(entry) {
+  return BIRTHDAY_MESSAGE_TEMPLATE
+    .replace(/\\n/g, '\n')
+    .replace(/\{prenom\}/g, entry.prenom.trim())
+    .replace(/\{nom\}/g, entry.nom.trim());
+}
+
 const BIRTHDAY_FILE = path.join(STATE_DIR, 'birthdays.json');
 const BIRTHDAY_LOG_FILE = path.join(STATE_DIR, 'birthday_delivery.json');
 let birthdayTimer = null;
@@ -60,7 +69,7 @@ async function checkDailyBirthdays() {
       if (stopping || !ready || !client) break;
       const key = `birthday:${clock.date}:${entry.id}`;
       if (birthdayDelivery[key]) continue;
-      const message = `🎂 Joyeux anniversaire à ${entry.prenom.trim()} ${entry.nom.trim()} ! 🎉`;
+      const message = birthdayMessage(entry);
       try {
         const result = await client.sendMessage(GROUP_ID, message);
         birthdayDelivery[key] = { ts: Date.now(), messageId: result?.id?._serialized || null };

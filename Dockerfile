@@ -1,4 +1,3 @@
-
 FROM node:22-bookworm-slim
 
 # Installer Chromium et ses dépendances
@@ -12,11 +11,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Installer les dépendances Node.js
+# Copier les fichiers nécessaires à npm
 COPY package*.json ./
+
+# Copier le correctif avant npm install
+COPY patch-whatsapp-media.js ./
+
+# Installer les dépendances et exécuter le postinstall
 RUN npm install --omit=dev
 
-# Copier le serveur
+# Copier le reste du serveur
 COPY . .
 
 ENV NODE_ENV=production

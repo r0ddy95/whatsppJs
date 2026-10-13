@@ -311,6 +311,56 @@ app.post('/birthdays/test', async (req, res) => {
   }
 });
 
+// Diagnostic lecture seule : ne declenche aucun message WhatsApp.
+// Acces protege par X-JJR-API-Key (meme cle que /groups).
+app.get('/birthdays/wa-diagnostic', apiAuth, async (req, res) => {
+  if (!ready || !client || !client.pupPage)
+    return res.status(503).json({ ok: false, error: 'whatsapp_not_ready' });
+  try {
+    const diagnostic = await client.pupPage.evaluate((testGroupId) => {
+      const out = {
+        whatsappVersion: window.Debug?.VERSION || null,
+        storeAvailable: !!window.Store,
+        requireAvailable: typeof window.require === 'function',
+        collectionsAvailable: false,
+        chatModels: null,
+        testGroupFoundInModels: false,
+        testGroupModelIdType: null,
+        testGroupModelHasId: false,
+        collectionError: null
+      };
+      try {
+        if (typeof window.require === 'function') {
+          const collection = window.require('WAWebCollections');
+          out.collectionsAvailable = !!collection;
+          const models = collection?.Chat?.getModelsArray?.();
+          if (Array.isArray(models)) {
+            out.chatModels = models.length;
+            const group = models.find(chat => {
+              const id = chat?.id;
+              const serialized = typeof id === 'string' ? id : id?._serialized ||
+                (id?.user && id?.server ? `${id.user}@${id.server}` : '');
+              return serialized === testGroupId;
+            });
+            out.testGroupFoundInModels = !!group;
+            if (group) {
+              out.testGroupModelIdType = typeof group.id;
+              out.testGroupModelHasId = !!group.id;
+            }
+          }
+        }
+      } catch (e) { out.collectionError = String(e?.message || e).slice(0, 300); }
+      return out;
+    }, TEST_GROUP_ID);
+    console.log('[WA-DIAG] Lecture seule:', JSON.stringify(diagnostic));
+    return res.json({ ok: true, diagnostic, whatsappWebJsVersion: WA_VERSION,
+      testGroupConfigured: !!TEST_GROUP_ID, testGroupDifferentFromOfficial: !!TEST_GROUP_ID && TEST_GROUP_ID !== GROUP_ID });
+  } catch (e) {
+    console.error('[WA-DIAG] Echec:', e?.message || e);
+    return res.status(500).json({ ok: false, error: 'diagnostic_failed' });
+  }
+});
+
 app.get('/birthdays/status', apiAuth, (req, res) => {
   const clock = parisClock();
   res.json({ ok: true, date: clock.date, parisHour: clock.hour,

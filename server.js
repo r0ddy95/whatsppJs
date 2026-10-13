@@ -11,6 +11,7 @@ const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.API_KEY || '';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const GROUP_ID = process.env.WHATSAPP_GROUP_ID || '';
+const TEST_GROUP_ID = process.env.WHATSAPP_TEST_GROUP_ID || '';
 const SESSION_PATH = process.env.SESSION_PATH || '/data/whatsapp';
 const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
@@ -249,25 +250,28 @@ app.post('/birthdays/test', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'invalid_id' });
   const entry = birthdays[id];
   if (!entry) return res.status(404).json({ ok: false, error: 'student_not_synced' });
-  if (!GROUP_ID || !ready || !client)
+  if (!TEST_GROUP_ID || TEST_GROUP_ID === GROUP_ID || !TEST_GROUP_ID.endsWith('@g.us'))
+    return res.status(503).json({ ok: false, error: 'test_group_not_configured_or_unsafe' });
+  if (!ready || !client)
     return res.status(503).json({ ok: false, error: 'whatsapp_not_ready' });
   if (Date.now() - lastBirthdayTestAt < 60000)
     return res.status(429).json({ ok: false, error: 'wait_60_seconds' });
   lastBirthdayTestAt = Date.now();
+  console.log('[birthdays/test] Destination groupe test:', TEST_GROUP_ID);
   const message = '🧪 TEST ANNIVERSAIRE — ' + birthdayMessage(entry);
   try {
     let result, mode = 'texte';
     if (entry.photo && validBirthdayPhoto(entry.photo)) {
       try {
         const media = new MessageMedia(entry.photo.mimetype, entry.photo.data, 'anniversaire-test.jpg');
-        result = await client.sendMessage(GROUP_ID, media, { caption: message });
+        result = await client.sendMessage(TEST_GROUP_ID, media, { caption: message });
         mode = 'photo';
       } catch (e) {
         console.warn('[birthdays] Test photo échoué, texte de secours élève', id, e.message);
-        result = await client.sendMessage(GROUP_ID, message);
+        result = await client.sendMessage(TEST_GROUP_ID, message);
       }
     } else {
-      result = await client.sendMessage(GROUP_ID, message);
+      result = await client.sendMessage(TEST_GROUP_ID, message);
     }
     console.log('[birthdays] TEST envoyé élève', id, 'mode=' + mode);
     return res.json({ ok: true, mode, photoStored: !!entry.photo,

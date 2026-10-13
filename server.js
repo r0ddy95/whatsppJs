@@ -16,6 +16,10 @@ const STATE_DIR = process.env.STATE_PATH || '/data/state';
 const SENT_FILE = path.join(STATE_DIR, 'sent.json');
 const RETRY_MS = 30000;
 const BIRTHDAY_SYNC_TOKEN = process.env.JJR_BIRTHDAY_SYNC_TOKEN || '';
+const BIRTHDAY_MESSAGE_TEMPLATE = process.env.JJR_BIRTHDAY_MESSAGE || '🎂 Joyeux anniversaire à {prenom} {nom} ! 🎉';
+function birthdayMessage(entry) {
+  return BIRTHDAY_MESSAGE_TEMPLATE.replace(/\\n/g, '\n').replace(/\{prenom\}/g, () => entry.prenom.trim()).replace(/\{nom\}/g, () => entry.nom.trim());
+}
 const BIRTHDAY_FILE = path.join(STATE_DIR, 'birthdays.json');
 const BIRTHDAY_LOG_FILE = path.join(STATE_DIR, 'birthday_delivery.json');
 let birthdayTimer = null;
@@ -65,13 +69,15 @@ async function checkDailyBirthdays() {
       if (stopping || !ready || !client) break;
       const key = `birthday:${clock.date}:${entry.id}`;
       if (birthdayDelivery[key]) continue;
-      const message = `🎂 Joyeux anniversaire à ${entry.prenom.trim()} ${entry.nom.trim()} ! 🎉`;
+      const message = birthdayMessage(entry);
       try {
         let result;
+        let deliveryMode = 'texte';
         if (entry.photo && validBirthdayPhoto(entry.photo)) {
           try {
             const media = new MessageMedia(entry.photo.mimetype, entry.photo.data, 'anniversaire.jpg');
             result = await client.sendMessage(GROUP_ID, media, { caption: message });
+            deliveryMode = 'photo';
           } catch (photoError) {
             console.warn('[birthdays] Photo indisponible, repli texte eleve', entry.id, photoError.message);
             result = await client.sendMessage(GROUP_ID, message);
@@ -81,7 +87,7 @@ async function checkDailyBirthdays() {
         }
         birthdayDelivery[key] = { ts: Date.now(), messageId: result?.id?._serialized || null };
         writeJsonAtomic(BIRTHDAY_LOG_FILE, birthdayDelivery);
-        console.log('[birthdays] Envoyé', clock.date, 'eleve', entry.id);
+        console.log('[birthdays] Envoyé', clock.date, 'eleve', entry.id, 'mode=' + deliveryMode);
       } catch (e) {
         console.error('[birthdays] Echec envoi eleve', entry.id, e.message);
       }
@@ -90,6 +96,7 @@ async function checkDailyBirthdays() {
 }
 function startBirthdayScheduler() {
   console.log('[birthdays] Planificateur Railway activé (Europe/Paris, dès 06:00)');
+  console.log('[birthdays] Message personnalisé:', !!process.env.JJR_BIRTHDAY_MESSAGE, '| photos stockées:', Object.values(birthdays).filter(e => e.photo && validBirthdayPhoto(e.photo)).length);
   birthdayTimer = setInterval(() => checkDailyBirthdays().catch(e => console.error('[birthdays]', e)), 10000);
   checkDailyBirthdays().catch(e => console.error('[birthdays]', e));
 }
@@ -220,7 +227,7 @@ app.post('/birthdays/sync', (req, res) => {
     }
     writeJsonAtomic(BIRTHDAY_FILE, next);
     birthdays = next;
-    console.log('[birthdays] Synchronisation', bulk ? 'complète' : 'unitaire', 'total', Object.keys(birthdays).length);
+    console.log('[birthdays] Synchronisation', bulk ? 'complète' : 'unitaire', 'total', Object.keys(birthdays).length, 'photos=' + Object.values(birthdays).filter(e => e.photo && validBirthdayPhoto(e.photo)).length, 'photoEleve=' + (bulk ? 'lot' : (body.photo === undefined ? 'inchangée' : body.photo ? 'présente' : 'absente')));
     res.json({ ok: true, total: Object.keys(birthdays).length });
     checkDailyBirthdays().catch(e => console.error('[birthdays]', e));
   } catch (e) {
@@ -232,6 +239,8 @@ app.get('/birthdays/status', apiAuth, (req, res) => {
   const clock = parisClock();
   res.json({ ok: true, date: clock.date, parisHour: clock.hour,
     students: Object.keys(birthdays).length,
+    photos: Object.values(birthdays).filter(e => e.photo && validBirthdayPhoto(e.photo)).length,
+    messageCustomized: !!process.env.JJR_BIRTHDAY_MESSAGE,
     today: Object.values(birthdays).filter(e => e.month_day === clock.monthDay).length,
     sentToday: Object.keys(birthdayDelivery).filter(k => k.startsWith('birthday:' + clock.date + ':')).length,
     whatsappReady: ready });

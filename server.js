@@ -235,6 +235,49 @@ app.post('/birthdays/sync', (req, res) => {
     res.status(500).json({ ok: false, error: 'storage_failed' });
   }
 });
+// Test manuel admin : envoi réel au groupe, sans modifier l'historique des anniversaires.
+// Même secret que la synchronisation PHP ; limiter les essais pour éviter les abus.
+let lastBirthdayTestAt = 0;
+app.post('/birthdays/test', async (req, res) => {
+  const auth = req.get('authorization') || '';
+  const expected = 'Bearer ' + BIRTHDAY_SYNC_TOKEN;
+  const a = Buffer.from(auth), b = Buffer.from(expected);
+  if (!BIRTHDAY_SYNC_TOKEN || a.length !== b.length || !timingSafeEqual(a, b))
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  const id = Number(req.body?.id);
+  if (!Number.isSafeInteger(id) || id < 1)
+    return res.status(400).json({ ok: false, error: 'invalid_id' });
+  const entry = birthdays[id];
+  if (!entry) return res.status(404).json({ ok: false, error: 'student_not_synced' });
+  if (!GROUP_ID || !ready || !client)
+    return res.status(503).json({ ok: false, error: 'whatsapp_not_ready' });
+  if (Date.now() - lastBirthdayTestAt < 60000)
+    return res.status(429).json({ ok: false, error: 'wait_60_seconds' });
+  lastBirthdayTestAt = Date.now();
+  const message = '🧪 TEST ANNIVERSAIRE — ' + birthdayMessage(entry);
+  try {
+    let result, mode = 'texte';
+    if (entry.photo && validBirthdayPhoto(entry.photo)) {
+      try {
+        const media = new MessageMedia(entry.photo.mimetype, entry.photo.data, 'anniversaire-test.jpg');
+        result = await client.sendMessage(GROUP_ID, media, { caption: message });
+        mode = 'photo';
+      } catch (e) {
+        console.warn('[birthdays] Test photo échoué, texte de secours élève', id, e.message);
+        result = await client.sendMessage(GROUP_ID, message);
+      }
+    } else {
+      result = await client.sendMessage(GROUP_ID, message);
+    }
+    console.log('[birthdays] TEST envoyé élève', id, 'mode=' + mode);
+    return res.json({ ok: true, mode, photoStored: !!entry.photo,
+      messageId: result?.id?._serialized || null });
+  } catch (e) {
+    console.error('[birthdays] TEST erreur élève', id, e.message);
+    return res.status(502).json({ ok: false, error: 'send_failed' });
+  }
+});
+
 app.get('/birthdays/status', apiAuth, (req, res) => {
   const clock = parisClock();
   res.json({ ok: true, date: clock.date, parisHour: clock.hour,

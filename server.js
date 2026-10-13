@@ -259,6 +259,30 @@ app.post('/birthdays/test', async (req, res) => {
     return res.status(429).json({ ok: false, error: 'wait_60_seconds' });
   lastBirthdayTestAt = Date.now();
   console.log('[birthdays/test] Destination groupe test:', TEST_GROUP_ID, '| whatsapp-web.js:', WA_VERSION);
+  // Diagnostic du groupe avant l'envoi : ne change jamais la destination.
+  try {
+    const chat = await client.getChatById(TEST_GROUP_ID);
+    console.log('[birthdays/test] Groupe résolu:', JSON.stringify({
+      id: chat?.id?._serialized || null,
+      isGroup: chat?.isGroup === true,
+      name: chat?.name || null
+    }));
+    if (!chat || chat.isGroup !== true || chat.id?._serialized !== TEST_GROUP_ID) {
+      return res.status(503).json({ ok: false, error: 'test_group_resolution_mismatch' });
+    }
+  } catch (e) {
+    console.error('[birthdays/test] Résolution groupe échouée:', e?.stack || e);
+    return res.status(503).json({ ok: false, error: 'test_group_resolution_failed' });
+  }
+  if (entry.photo) {
+    const bytes = Buffer.from(entry.photo.data, 'base64');
+    console.log('[birthdays/test] Photo:', JSON.stringify({
+      mimetype: entry.photo.mimetype,
+      bytes: bytes.length,
+      jpegSignature: bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9
+    }));
+  }
+
   const message = '🧪 TEST ANNIVERSAIRE — ' + birthdayMessage(entry);
   try {
     let result, mode = 'texte';
@@ -280,6 +304,19 @@ app.post('/birthdays/test', async (req, res) => {
           mode = 'document';
         } catch (documentError) {
           console.warn('[birthdays/test] Envoi document échoué élève', id, documentError?.stack || documentError);
+          // Test indépendant facultatif : ajouter diagnosticMedia:true à la requête.
+          // Aucune image de diagnostic n'est envoyée sans cette option explicite.
+          if (req.body?.diagnosticMedia === true) {
+            try {
+              const tinyPng = new MessageMedia('image/png',
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9zQxkAAAAASUVORK5CYII=',
+                'diagnostic.png');
+              await client.sendMessage(TEST_GROUP_ID, tinyPng, { caption: '🧪 Diagnostic média WhatsApp' });
+              console.log('[birthdays/test] Image PNG de diagnostic envoyée');
+            } catch (diagnosticError) {
+              console.error('[birthdays/test] Image PNG de diagnostic échouée:', diagnosticError?.stack || diagnosticError);
+            }
+          }
           result = await client.sendMessage(TEST_GROUP_ID, message);
         }
       }

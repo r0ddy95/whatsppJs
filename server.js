@@ -327,11 +327,7 @@ app.get('/birthdays/wa-diagnostic', apiAuth, async (req, res) => {
         testGroupFoundInModels: false,
         testGroupModelIdType: null,
         testGroupModelHasId: false,
-        collectionError: null,
-        testGroupIdShape: null,
-        testGroupModelShape: null,
-        modules: {},
-        moduleErrors: {}
+        collectionError: null
       };
       try {
         if (typeof window.require === 'function') {
@@ -350,37 +346,7 @@ app.get('/birthdays/wa-diagnostic', apiAuth, async (req, res) => {
             if (group) {
               out.testGroupModelIdType = typeof group.id;
               out.testGroupModelHasId = !!group.id;
-              const rawId = group.id;
-              out.testGroupIdShape = {
-                keys: rawId && typeof rawId === 'object' ? Object.keys(rawId).slice(0, 20) : [],
-                serializedType: typeof rawId?._serialized,
-                userType: typeof rawId?.user,
-                serverType: typeof rawId?.server,
-                toStringType: typeof rawId?.toString
-              };
-              out.testGroupModelShape = {
-                keys: Object.keys(group).slice(0, 35),
-                hasGroupMetadata: !!group.groupMetadata,
-                hasName: !!(group.name || group.formattedTitle)
-              };
             }
-          }
-        }
-        // Ne retourner que la disponibilité et la forme des modules, jamais les données privées.
-        const moduleNames = ['WAWebCollections', 'WAWebWidFactory', 'WAWebChat',
-          'WAWebSendMsgChatAction', 'WAWebMediaPrep', 'WAWebMediaUpload', 'WAWebMsgKey'];
-        for (const name of moduleNames) {
-          try {
-            const mod = window.require(name);
-            out.modules[name] = {
-              available: !!mod,
-              type: typeof mod,
-              exports: mod && (typeof mod === 'object' || typeof mod === 'function')
-                ? Object.keys(mod).slice(0, 25) : []
-            };
-          } catch (e) {
-            out.modules[name] = { available: false };
-            out.moduleErrors[name] = String(e?.message || e).slice(0, 120);
           }
         }
       } catch (e) { out.collectionError = String(e?.message || e).slice(0, 300); }

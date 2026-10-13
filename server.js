@@ -6,6 +6,7 @@ const path = require('path');
 const https = require('node:https');
 const { timingSafeEqual } = require('node:crypto');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const WA_VERSION = require('whatsapp-web.js/package.json').version;
 
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = process.env.API_KEY || '';
@@ -257,7 +258,7 @@ app.post('/birthdays/test', async (req, res) => {
   if (Date.now() - lastBirthdayTestAt < 60000)
     return res.status(429).json({ ok: false, error: 'wait_60_seconds' });
   lastBirthdayTestAt = Date.now();
-  console.log('[birthdays/test] Destination groupe test:', TEST_GROUP_ID);
+  console.log('[birthdays/test] Destination groupe test:', TEST_GROUP_ID, '| whatsapp-web.js:', WA_VERSION);
   const message = '🧪 TEST ANNIVERSAIRE — ' + birthdayMessage(entry);
   try {
     let result, mode = 'texte';
@@ -267,8 +268,20 @@ app.post('/birthdays/test', async (req, res) => {
         result = await client.sendMessage(TEST_GROUP_ID, media, { caption: message });
         mode = 'photo';
       } catch (e) {
-        console.warn('[birthdays] Test photo échoué, texte de secours élève', id, e.message);
-        result = await client.sendMessage(TEST_GROUP_ID, message);
+        console.warn('[birthdays/test] Envoi image échoué élève', id, e?.stack || e);
+        // Essai en tant que document JPEG : contournement possible des erreurs
+        // de préparation d'image dans certaines versions de WhatsApp Web.
+        try {
+          const document = new MessageMedia(entry.photo.mimetype, entry.photo.data, 'anniversaire-test.jpg');
+          result = await client.sendMessage(TEST_GROUP_ID, document, {
+            caption: message,
+            sendMediaAsDocument: true
+          });
+          mode = 'document';
+        } catch (documentError) {
+          console.warn('[birthdays/test] Envoi document échoué élève', id, documentError?.stack || documentError);
+          result = await client.sendMessage(TEST_GROUP_ID, message);
+        }
       }
     } else {
       result = await client.sendMessage(TEST_GROUP_ID, message);

@@ -197,24 +197,96 @@ async function startWhatsApp() {
 
 const app = express();
 app.use(express.json({ limit: '128kb' }));
+// En-têtes de sécurité pour les réponses de la passerelle.
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Frame-Options', 'DENY');
+  next();
+});
+
+// Limitation en mémoire des échecs d'authentification par adresse réseau.
+// Pas de dépendance supplémentaire, et aucun impact sur les requêtes valides.
+const authFailures = new Map();
+const AUTH_WINDOW_MS = 15 * 60 * 1000;
+const AUTH_MAX_FAILURES = 20;
+function authBucket(req) {
+  // Ne pas faire confiance à un X-Forwarded-For fourni par le client.
+  return req.socket.remoteAddress || 'unknown';
+}
+function authBlocked(req, res) {
+  const key = authBucket(req);
+  const item = authFailures.get(key);
+  if (!item) return false;
+  if (Date.now() - item.start >= AUTH_WINDOW_MS) {
+    authFailures.delete(key);
+    return false;
+  }
+  if (item.count < AUTH_MAX_FAILURES) return false;
+  res.set('Retry-After', String(Math.ceil((AUTH_WINDOW_MS - (Date.now() - item.start)) / 1000)));
+  res.status(429).json({ ok: false, error: 'too_many_attempts' });
+  return true;
+}
+function authFailure(req) {
+  const key = authBucket(req);
+  const now = Date.now();
+  const item = authFailures.get(key);
+  if (!item || now - item.start >= AUTH_WINDOW_MS) authFailures.set(key, { start: now, count: 1 });
+  else item.count++;
+  if (authFailures.size > 5000) {
+    for (const [k, v] of authFailures) {
+      if (now - v.start >= AUTH_WINDOW_MS) authFailures.delete(k);
+    }
+  }
+}
+function secretMatches(received, expected) {
+  if (!expected || typeof received !== 'string') return false;
+  const a = Buffer.from(received);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 function apiAuth(req, res, next) {
-  if (!API_KEY || req.get('X-JJR-API-Key') !== API_KEY) {
+  if (authBlocked(req, res)) return;
+  if (!secretMatches(req.get('X-JJR-API-Key'), API_KEY)) {
+    authFailure(req);
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
   next();
 }
+// Accès QR par authentification HTTP Basic (identifiant admin, mot de passe ADMIN_KEY).
+// La clé ne figure plus dans l'URL, contrairement à l'ancien paramètre ?key=.
 function adminAuth(req, res, next) {
-  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(401).send('Unauthorized');
+  if (authBlocked(req, res)) return;
+  const header = req.get('authorization') || '';
+  let username = '', password = '';
+  if (header.startsWith('Basic ')) {
+    try {
+      const raw = Buffer.from(header.slice(6), 'base64').toString('utf8');
+      const separator = raw.indexOf(':');
+      if (separator !== -1) {
+        username = raw.slice(0, separator);
+        password = raw.slice(separator + 1);
+      }
+    } catch (_) {}
+  }
+  if (username !== 'admin' || !secretMatches(password, ADMIN_KEY)) {
+    authFailure(req);
+    res.set('WWW-Authenticate', 'Basic realm="JJR WhatsApp QR", charset="UTF-8"');
+    return res.status(401).send('Authentification requise');
+  }
   next();
 }
 
 // Synchronisation sortante PHP -> Railway, protégée par un secret distinct de API_KEY.
 app.post('/birthdays/sync', (req, res) => {
   const auth = req.get('authorization') || '';
-  const expected = 'Bearer ' + BIRTHDAY_SYNC_TOKEN;
-  const a = Buffer.from(auth), b = Buffer.from(expected);
-  if (!BIRTHDAY_SYNC_TOKEN || a.length !== b.length || !timingSafeEqual(a, b))
+  if (authBlocked(req, res)) return;
+  if (!secretMatches(auth, 'Bearer ' + BIRTHDAY_SYNC_TOKEN) || !BIRTHDAY_SYNC_TOKEN) {
+    authFailure(req);
     return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
   const body = req.body;
   const bulk = Array.isArray(body?.students) && body?.replace === true;
   const items = bulk ? body.students : [body];
@@ -242,10 +314,11 @@ app.post('/birthdays/sync', (req, res) => {
 let lastBirthdayTestAt = 0;
 app.post('/birthdays/test', async (req, res) => {
   const auth = req.get('authorization') || '';
-  const expected = 'Bearer ' + BIRTHDAY_SYNC_TOKEN;
-  const a = Buffer.from(auth), b = Buffer.from(expected);
-  if (!BIRTHDAY_SYNC_TOKEN || a.length !== b.length || !timingSafeEqual(a, b))
+  if (authBlocked(req, res)) return;
+  if (!secretMatches(auth, 'Bearer ' + BIRTHDAY_SYNC_TOKEN) || !BIRTHDAY_SYNC_TOKEN) {
+    authFailure(req);
     return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
   const id = Number(req.body?.id);
   if (!Number.isSafeInteger(id) || id < 1)
     return res.status(400).json({ ok: false, error: 'invalid_id' });
@@ -372,7 +445,7 @@ app.get('/birthdays/status', apiAuth, (req, res) => {
     whatsappReady: ready });
 });
 
-app.get('/', (req, res) => res.json({ service: 'JJR WhatsApp Gateway', ok: true, whatsappReady: ready }));
+app.get('/', (req, res) => res.json({ ok: true }));
 app.get('/health', apiAuth, (req, res) => res.json({
   ok: true, whatsappReady: ready, groupConfigured: !!GROUP_ID, lastQrAt,
   starting, startupAttempt
